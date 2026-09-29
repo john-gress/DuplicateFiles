@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-compare_directories.py - Given the database built by scan_photos.py, find
+compare_directories.py - Given the database built by scan_files.py, find
 pairs of directories (at ANY depth, not just top-level folders) whose
 contents overlap, and report what percentage of each directory's content
 is found in the other.
@@ -10,11 +10,11 @@ DIR_A/DIR_C?" even though DIR_E is nested two levels deep and DIR_C is only
 one level deep - depth doesn't have to match for a comparison to be valid.
 
 Definitions:
-  - "Content" of a directory = the set of DISTINCT sha256 hashes of every
+  - "Content" of a directory = the set of DISTINCT content hashes of every
     file anywhere underneath it (recursive), for files that hashed
     successfully. Two files with the same hash inside one directory don't
     inflate that directory's own count.
-  - Only exact_sha256 matches count as "the same file" here - this is
+  - Only exact hash matches count as "the same file" here - this is
     meant to be a rigorous statement about content overlap, so weaker
     signals (timestamp/GPS, filename) are intentionally not used.
   - Directory pairs where one is an ancestor of the other are skipped
@@ -29,8 +29,8 @@ Read pct_a_in_b == 100 as "A's content is entirely inside B" (A subset of B),
 and both == 100 as "A and B have identical content."
 
 Usage:
-    python compare_directories.py media.db --root "/Volumes/Backup Drive"
-    python compare_directories.py media.db --root "/Volumes/Backup Drive" --output-dir ~/photo-project
+    python compare_directories.py files.db --root "/Volumes/Backup Drive"
+    python compare_directories.py files.db --root "/Volumes/Backup Drive" --output-dir ~/photo-project
 
 Writes directory_comparison.csv into --output-dir (default: current directory).
 """
@@ -44,21 +44,21 @@ from itertools import combinations
 from pathlib import Path
 
 
-def load_media(conn):
-    cur = conn.execute("SELECT path, sha256 FROM media WHERE sha256 IS NOT NULL")
+def load_files(conn):
+    cur = conn.execute("SELECT path, content_hash FROM files WHERE content_hash IS NOT NULL")
     return cur.fetchall()
 
 
 def duplicated_hash_groups(conn):
     """Hashes that appear more than once, each with its list of file paths."""
     cur = conn.execute("""
-        SELECT sha256, GROUP_CONCAT(path, '\x1f')
-        FROM media
-        WHERE sha256 IS NOT NULL
-        GROUP BY sha256
+        SELECT content_hash, GROUP_CONCAT(path, '\x1f')
+        FROM files
+        WHERE content_hash IS NOT NULL
+        GROUP BY content_hash
         HAVING COUNT(*) > 1
     """)
-    return [(sha256, paths.split("\x1f")) for sha256, paths in cur.fetchall()]
+    return [(content_hash, paths.split("\x1f")) for content_hash, paths in cur.fetchall()]
 
 
 def ancestor_chain(path, root):
@@ -91,15 +91,15 @@ def is_ancestor_or_self(a, b):
         return False
 
 
-def hash_set_for_dir(directory, all_media, cache):
+def hash_set_for_dir(directory, all_files, cache):
     """Recursive set of distinct hashes for everything under `directory`."""
     if directory in cache:
         return cache[directory]
     result = set()
-    for path, sha256 in all_media:
+    for path, content_hash in all_files:
         try:
             Path(path).relative_to(directory)
-            result.add(sha256)
+            result.add(content_hash)
         except ValueError:
             pass
     cache[directory] = result
@@ -117,7 +117,7 @@ def display_path(directory, root):
 
 def main():
     ap = argparse.ArgumentParser(description="Compare directory contents for subset/overlap relationships.")
-    ap.add_argument("db", help="Path to media.db")
+    ap.add_argument("db", help="Path to files.db")
     ap.add_argument("--root", default=None,
                      help="Scan root. Recommended - without it, the common path of all files is used, "
                           "and display paths fall back to full absolute paths.")
@@ -126,22 +126,22 @@ def main():
     args = ap.parse_args()
 
     conn = sqlite3.connect(args.db)
-    all_media = load_media(conn)
-    if not all_media:
+    all_files = load_files(conn)
+    if not all_files:
         print("No hashed files found in the database.")
         return
 
     if args.root:
         root = Path(args.root).resolve()
     else:
-        root = Path(os.path.commonpath([p for p, _ in all_media])).resolve()
+        root = Path(os.path.commonpath([p for p, _ in all_files])).resolve()
         print(f"No --root given; using common path as root: {root}")
 
     groups = duplicated_hash_groups(conn)
     print(f"{len(groups)} distinct files have 2+ copies on the drive; deriving candidate directory pairs...")
 
     candidate_pairs = set()
-    for _sha256, paths in groups:
+    for _content_hash, paths in groups:
         dirs_touched = set()
         for p in paths:
             dirs_touched.update(ancestor_chain(p, root))
@@ -156,8 +156,8 @@ def main():
     rows = []
     for pair in candidate_pairs:
         a, b = sorted(pair, key=str)
-        hashes_a = hash_set_for_dir(a, all_media, cache)
-        hashes_b = hash_set_for_dir(b, all_media, cache)
+        hashes_a = hash_set_for_dir(a, all_files, cache)
+        hashes_b = hash_set_for_dir(b, all_files, cache)
         common = len(hashes_a & hashes_b)
         total_a, total_b = len(hashes_a), len(hashes_b)
         pct_a_in_b = round(100 * common / total_a, 1) if total_a else 0.0

@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
 """
-find_duplicates.py - Analyze the database built by scan_photos.py and
-report groups of likely-duplicate photos/videos, at four confidence tiers:
+find_duplicates.py - Analyze the database built by scan_files.py and
+report groups of likely-duplicate files (any type - photos, videos,
+documents, whatever was scanned), at four confidence tiers:
 
-  1. exact_sha256           - byte-identical files (certain duplicates)
-  2. same_datetime_gps       - same capture time + GPS coords (near-certain;
-                                catches copies that were resized/re-encoded
-                                and so no longer hash identically)
-  3. same_filename_and_size  - same normalized filename (ignoring "(1)",
-                                "-copy" etc. suffixes) AND same byte size
-                                (fairly strong, independent of metadata/hash)
-  4. same_filename_only      - same normalized filename, different size
-                                (weak signal on its own - cameras/phones
-                                often reuse sequential filenames like
-                                IMG_0001.jpg after a card reset or on a new
-                                device, so this tier is for manual review)
+  1. exact_hash              - byte-identical files (certain duplicates)
+  2. same_datetime_gps        - same capture time + GPS coords (near-certain
+                                 for photos/videos specifically; catches
+                                 copies that were resized/re-encoded and so
+                                 no longer hash identically - this tier
+                                 naturally only matches media files, since
+                                 only they carry EXIF GPS data)
+  3. same_filename_and_size   - same normalized filename (ignoring "(1)",
+                                 "-copy" etc. suffixes) AND same byte size
+                                 (fairly strong, independent of metadata/hash)
+  4. same_filename_only       - same normalized filename, different size
+                                 (weak signal on its own - reused filenames
+                                 are common, so this tier is for manual
+                                 review)
 
 Each duplicate group is tagged with the set of directories its files live
 in, and the report is sorted by that so groups touching the same folder(s)
@@ -26,11 +29,11 @@ each pair of directories shares - useful for spotting a folder that's
 almost entirely redundant with another.
 
 Usage:
-    python find_duplicates.py media.db                                    # exact_sha256 only (default)
-    python find_duplicates.py media.db --datetime-gps                     # exact + date/GPS
-    python find_duplicates.py media.db --filename-size --filename-only
-    python find_duplicates.py media.db --all                              # every tier
-    python find_duplicates.py media.db --all --root "/Volumes/Backup Drive" --output-dir ~/photo-project
+    python find_duplicates.py files.db                                    # exact_hash only (default)
+    python find_duplicates.py files.db --datetime-gps                     # exact + date/GPS
+    python find_duplicates.py files.db --filename-size --filename-only
+    python find_duplicates.py files.db --all                              # every tier
+    python find_duplicates.py files.db --all --root "/Volumes/Backup Drive" --output-dir ~/photo-project
 
 Writes duplicates_report.csv and directory_pairs.csv into --output-dir (default: current directory).
 """
@@ -66,10 +69,10 @@ def group_rows(rows, key_func):
 
 def exact_duplicates(conn):
     cur = conn.execute("""
-        SELECT sha256, COUNT(*) as n, GROUP_CONCAT(path, ' | ') as paths
-        FROM media
-        WHERE sha256 IS NOT NULL
-        GROUP BY sha256
+        SELECT content_hash, COUNT(*) as n, GROUP_CONCAT(path, ' | ') as paths
+        FROM files
+        WHERE content_hash IS NOT NULL
+        GROUP BY content_hash
         HAVING n > 1
     """)
     return cur.fetchall()
@@ -78,7 +81,7 @@ def exact_duplicates(conn):
 def same_datetime_gps_duplicates(conn):
     cur = conn.execute("""
         SELECT date_taken, gps_lat, gps_lon, COUNT(*) as n, GROUP_CONCAT(path, ' | ') as paths
-        FROM media
+        FROM files
         WHERE date_taken IS NOT NULL AND gps_lat IS NOT NULL
         GROUP BY date_taken, gps_lat, gps_lon
         HAVING n > 1
@@ -87,7 +90,7 @@ def same_datetime_gps_duplicates(conn):
 
 
 def filename_duplicates(conn):
-    cur = conn.execute("SELECT path, filename, size_bytes FROM media")
+    cur = conn.execute("SELECT path, filename, size_bytes FROM files")
     rows = cur.fetchall()
 
     by_name_and_size = group_rows(rows, lambda r: (normalize_filename(r[1]), r[2]))
@@ -129,13 +132,13 @@ def directories_for_group(paths, root, level):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Find duplicate photos/videos from the scan database.")
-    ap.add_argument("db", help="Path to media.db")
+    ap = argparse.ArgumentParser(description="Find duplicate files from the scan database.")
+    ap.add_argument("db", help="Path to files.db")
     ap.add_argument("--output-dir", default=".",
                      help="Directory to write duplicates_report.csv and directory_pairs.csv into "
                           "(created if it doesn't exist)")
     ap.add_argument("--exact", action="store_true",
-                     help="Include exact_sha256 matches (this is the default if no tier flags are given)")
+                     help="Include exact_hash matches (this is the default if no tier flags are given)")
     ap.add_argument("--datetime-gps", action="store_true", help="Include same_datetime_gps matches")
     ap.add_argument("--filename-size", action="store_true", help="Include same_filename_and_size matches")
     ap.add_argument("--filename-only", action="store_true",
@@ -194,8 +197,8 @@ def main():
         for a, b in combinations(dirs, 2):
             pair_counts[tuple(sorted((a, b)))] += 1
 
-    for sha256, n, paths_str in exact:
-        accept("exact_sha256", sha256, paths_str.split(" | "))
+    for content_hash, n, paths_str in exact:
+        accept("exact_hash", content_hash, paths_str.split(" | "))
 
     for date_taken, lat, lon, n, paths_str in same_meta:
         paths = paths_str.split(" | ")
@@ -220,7 +223,7 @@ def main():
 
     # Sort so groups touching the same directory (or directory combination)
     # cluster together, rather than being ordered by match tier.
-    tier_rank = {"exact_sha256": 0, "same_datetime_gps": 1,
+    tier_rank = {"exact_hash": 0, "same_datetime_gps": 1,
                  "same_filename_and_size": 2, "same_filename_only": 3}
     report_rows.sort(key=lambda r: ("; ".join(r[4]), tier_rank[r[0]], r[1]))
 
